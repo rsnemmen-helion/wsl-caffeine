@@ -36,10 +36,11 @@ behavior resume immediately.
 number of seconds (`5400`).
 
 In an interactive terminal, the script displays a full-screen falling-letter
-dashboard in Helion's navy, blue, pink, and off-white palette. It shows the
-successful tick count, elapsed time, next tick, remaining duration, and the
-latest error. The display adapts when the terminal is resized and restores the
-screen and cursor when the script exits.
+dashboard with letter trails shaded from Helion's `#CD2683` pink. Navy, blue,
+and off-white frame the status panel, which shows the successful tick count,
+elapsed time, next tick, remaining duration, and latest error. The display
+adapts when the terminal is resized and restores the screen and cursor when the
+script exits.
 
 Use `--plain` for timestamped lines. Plain output is also selected automatically
 when output is redirected, `TERM` is unset or `dumb`, or `NO_COLOR` is set:

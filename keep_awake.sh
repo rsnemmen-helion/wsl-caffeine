@@ -183,7 +183,10 @@ panel_width=0
 readonly ESC=$'\033'
 readonly HELION_BG="${ESC}[48;2;28;43;68m"
 readonly HELION_BLUE="${ESC}[22;38;2;98;144;204m"
+readonly HELION_PINK_LIGHT="${ESC}[22;38;2;218;120;177m"
 readonly HELION_PINK="${ESC}[22;38;2;205;38;131m"
+readonly HELION_PINK_MID="${ESC}[22;38;2;152;40;112m"
+readonly HELION_PINK_DARK="${ESC}[22;38;2;99;41;93m"
 readonly HELION_WHITE="${ESC}[22;38;2;238;242;245m"
 readonly HELION_MUTED="${ESC}[22;38;2;207;207;223m"
 readonly MATRIX_CHARS='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789HELIONENERGYFUSION'
@@ -295,13 +298,13 @@ render_dashboard() {
 			idx=$((RANDOM % ${#MATRIX_CHARS}))
 			glyph="${MATRIX_CHARS:idx:1}"
 			if ((j == 0)); then
-				color="$HELION_WHITE"
-			elif ((j == 1 && (i + frame) % 7 == 0)); then
+				color="$HELION_PINK_LIGHT"
+			elif ((j == 1)); then
 				color="$HELION_PINK"
-			elif ((j < 3)); then
-				color="$HELION_BLUE"
+			elif ((j < 4)); then
+				color="$HELION_PINK_MID"
 			else
-				color="$HELION_MUTED${ESC}[2m"
+				color="$HELION_PINK_DARK"
 			fi
 			draw_buf+="${ESC}[${row};${col}H${color}${glyph}"
 		done
