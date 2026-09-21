@@ -3,7 +3,7 @@
 # keep_awake.sh - Keep this Windows 11 machine awake from inside WSL.
 #
 # Usage:
-#   ./keep_awake.sh [interval_seconds] [--for DURATION] [--plain]
+#   ./keep_awake.sh [interval_seconds] [--for DURATION] [--letters-only] [--plain]
 #   ./keep_awake.sh --help
 #
 # Examples:
@@ -11,6 +11,7 @@
 #   ./keep_awake.sh 30               # tick every 30s, until Ctrl+C
 #   ./keep_awake.sh --for 2h         # stop automatically after 2 hours
 #   ./keep_awake.sh 30 --for 1h30m   # 30s ticks, stop after 90 minutes
+#   ./keep_awake.sh --letters-only    # show falling letters without status text
 #   ./keep_awake.sh --plain           # use timestamped lines, no animation
 #
 # DURATION takes h/m/s parts (2h, 90m, 45s, 1h30m) or a bare number of seconds.
@@ -78,6 +79,7 @@ fmt_duration() {
 interval=''
 duration_spec=''
 plain_output=0
+letters_only=0
 while (($# > 0)); do
 	case "$1" in
 	--help | -h)
@@ -97,6 +99,9 @@ while (($# > 0)); do
 		;;
 	--plain)
 		plain_output=1
+		;;
+	--letters-only)
+		letters_only=1
 		;;
 	-*)
 		echo "keep_awake: unknown option '$1' (try --help)" >&2
@@ -269,7 +274,7 @@ render_dashboard() {
 	fi
 	next_label="$(fmt_duration "$((next_tick > now ? next_tick - now : 0))")"
 
-	if ((term_cols < 40 || term_rows < 12)); then
+	if ((letters_only == 0 && (term_cols < 40 || term_rows < 12))); then
 		minimal_line="KEEP AWAKE  |  TICKS $ticks  |  NEXT $next_label"
 		minimal_line="${minimal_line:0:term_cols}"
 		draw_buf+="${ESC}[$((term_rows / 2));1H${HELION_PINK}${minimal_line}"
@@ -309,6 +314,12 @@ render_dashboard() {
 			draw_buf+="${ESC}[${row};${col}H${color}${glyph}"
 		done
 	done
+
+	if ((letters_only)); then
+		printf '%s' "$draw_buf"
+		frame=$((frame + 1))
+		return
+	fi
 
 	panel_width=$((term_cols - 4))
 	((panel_width > 70)) && panel_width=70

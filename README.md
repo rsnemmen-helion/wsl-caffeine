@@ -21,7 +21,7 @@ behavior resume immediately.
 ## Usage
 
 ```bash
-./keep_awake.sh [interval_seconds] [--for DURATION] [--plain]
+./keep_awake.sh [interval_seconds] [--for DURATION] [--letters-only] [--plain]
 ```
 
 | Invocation | Effect |
@@ -30,6 +30,7 @@ behavior resume immediately.
 | `./keep_awake.sh 30` | Tick every 30 s until Ctrl+C |
 | `./keep_awake.sh --for 2h` | Stop automatically after 2 hours |
 | `./keep_awake.sh 30 --for 1h30m` | 30 s ticks, stop after 90 minutes |
+| `./keep_awake.sh --letters-only` | Show only the falling letters, without the status panel |
 | `./keep_awake.sh --plain` | Use timestamped text instead of the dashboard |
 
 `DURATION` takes `h`/`m`/`s` parts (`2h`, `90m`, `45s`, `1h30m`) or a bare
@@ -41,6 +42,9 @@ and off-white frame the status panel, which shows the successful tick count,
 elapsed time, next tick, remaining duration, and latest error. The display
 adapts when the terminal is resized and restores the screen and cursor when the
 script exits.
+
+Pass `--letters-only` to hide the status panel and let the falling letters fill
+the entire terminal. This option affects the interactive dashboard only.
 
 Use `--plain` for timestamped lines. Plain output is also selected automatically
 when output is redirected, `TERM` is unset or `dumb`, or `NO_COLOR` is set:
