@@ -21,7 +21,7 @@ behavior resume immediately.
 ## Usage
 
 ```bash
-./keep_awake.sh [interval_seconds] [--for DURATION]
+./keep_awake.sh [interval_seconds] [--for DURATION] [--plain]
 ```
 
 | Invocation | Effect |
@@ -30,11 +30,19 @@ behavior resume immediately.
 | `./keep_awake.sh 30` | Tick every 30 s until Ctrl+C |
 | `./keep_awake.sh --for 2h` | Stop automatically after 2 hours |
 | `./keep_awake.sh 30 --for 1h30m` | 30 s ticks, stop after 90 minutes |
+| `./keep_awake.sh --plain` | Use timestamped text instead of the dashboard |
 
 `DURATION` takes `h`/`m`/`s` parts (`2h`, `90m`, `45s`, `1h30m`) or a bare
 number of seconds (`5400`).
 
-Each tick prints a timestamped line; timed runs also show the time remaining:
+In an interactive terminal, the script displays a full-screen falling-letter
+dashboard in Helion's navy, blue, pink, and off-white palette. It shows the
+successful tick count, elapsed time, next tick, remaining duration, and the
+latest error. The display adapts when the terminal is resized and restores the
+screen and cursor when the script exits.
+
+Use `--plain` for timestamped lines. Plain output is also selected automatically
+when output is redirected, `TERM` is unset or `dumb`, or `NO_COLOR` is set:
 
 ```
 keep_awake: holding this machine awake for 1h30m (tick every 30s). Ctrl+C to stop early.
