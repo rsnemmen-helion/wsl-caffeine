@@ -3,14 +3,16 @@
 # keep_awake.sh - Keep this Windows 11 machine awake from inside WSL.
 #
 # Usage:
-#   ./keep_awake.sh [interval_seconds] [--for DURATION] [--letters-only] [--plain]
+#   ./keep_awake.sh [idle_seconds] [--method mouse|f15] [--for DURATION]
+#                   [--letters-only] [--plain]
 #   ./keep_awake.sh --help
 #
 # Examples:
-#   ./keep_awake.sh                  # tick every 60s, until Ctrl+C
-#   ./keep_awake.sh 30               # tick every 30s, until Ctrl+C
+#   ./keep_awake.sh                  # intervene after 60s idle, until Ctrl+C
+#   ./keep_awake.sh 30               # intervene after 30s idle, until Ctrl+C
 #   ./keep_awake.sh --for 2h         # stop automatically after 2 hours
-#   ./keep_awake.sh 30 --for 1h30m   # 30s ticks, stop after 90 minutes
+#   ./keep_awake.sh 30 --for 1h30m   # 30s idle threshold, stop after 90 minutes
+#   ./keep_awake.sh --method f15     # explicitly use F15 instead of mouse pulses
 #   ./keep_awake.sh --letters-only    # show falling letters without status text
 #   ./keep_awake.sh --plain           # use timestamped lines, no animation
 #
@@ -18,16 +20,19 @@
 # Interactive terminals show a Helion-colored falling-letter dashboard. Use
 # --plain, NO_COLOR, or redirected output to select timestamped text instead.
 #
-# Sends a harmless F15 keypress to Windows on each tick via WSL interop.
-# Windows counts synthesized input as real user activity, so this resets the
-# idle timer and prevents the screensaver, the lock screen, and sleep.
+# Checks Windows activity every 5s (or idle_seconds, if shorter). Recent input
+# skips the pulse. Once idle, sends a zero-distance mouse movement via WSL
+# interop to reset the idle timer without typing keys or moving the cursor.
+# Mouse-aware applications may still notice the event. F15 is opt-in only.
+# Set the threshold below your screensaver/lock timeout, allowing for the
+# check interval and PowerShell startup time. Start before Windows locks.
 #
 # Only effective while running. Press Ctrl+C to stop early; normal power and
 # screensaver behavior resume immediately.
 
 set -uo pipefail
 
-readonly DEFAULT_INTERVAL=60
+readonly DEFAULT_IDLE_SECONDS=60
 readonly PS_FALLBACK='/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
 
 usage() {
@@ -76,7 +81,8 @@ fmt_duration() {
 	fi
 }
 
-interval=''
+idle_threshold=''
+method=mouse
 duration_spec=''
 plain_output=0
 letters_only=0
@@ -97,6 +103,17 @@ while (($# > 0)); do
 	--for=*)
 		duration_spec="${1#--for=}"
 		;;
+	--method)
+		shift
+		if (($# == 0)); then
+			echo "keep_awake: --method needs mouse or f15" >&2
+			exit 2
+		fi
+		method="$1"
+		;;
+	--method=*)
+		method="${1#--method=}"
+		;;
 	--plain)
 		plain_output=1
 		;;
@@ -108,26 +125,32 @@ while (($# > 0)); do
 		exit 2
 		;;
 	*)
-		if [[ -n "$interval" ]]; then
+		if [[ -n "$idle_threshold" ]]; then
 			echo "keep_awake: unexpected extra argument '$1' (try --help)" >&2
 			exit 2
 		fi
-		interval="$1"
+		idle_threshold="$1"
 		;;
 	esac
 	shift
 done
 
-interval="${interval:-$DEFAULT_INTERVAL}"
-if ! [[ "$interval" =~ ^[0-9]+$ ]] || ((interval < 1)); then
-	echo "keep_awake: interval must be a positive whole number of seconds (got '$interval')" >&2
+idle_threshold="${idle_threshold:-$DEFAULT_IDLE_SECONDS}"
+if ! [[ "$idle_threshold" =~ ^[0-9]+$ ]] || ((10#$idle_threshold < 1)); then
+	echo "keep_awake: idle threshold must be a positive whole number of seconds (got '$idle_threshold')" >&2
 	exit 2
 fi
+idle_threshold=$((10#$idle_threshold))
+if [[ "$method" != mouse && "$method" != f15 ]]; then
+	echo "keep_awake: method must be mouse or f15 (got '$method')" >&2
+	exit 2
+fi
+check_interval=5
+((idle_threshold < check_interval)) && check_interval="$idle_threshold"
 
-# Windows locks the screen well before most screensaver timeouts if we tick too
-# slowly, and ticking faster than once a second is pointless.
-if ((interval > 240)); then
-	echo "keep_awake: warning: an interval of ${interval}s may be longer than your" >&2
+# Leave room for polling and PowerShell startup before the Windows idle timeout.
+if ((idle_threshold > 240)); then
+	echo "keep_awake: warning: an idle threshold of ${idle_threshold}s may be longer than your" >&2
 	echo "            screensaver or lock timeout; 60s or less is recommended." >&2
 fi
 
@@ -164,12 +187,93 @@ if [[ -z "$powershell" ]]; then
 	fi
 fi
 
-# SendKeys needs a WinForms context; silencing the progress stream keeps PowerShell
-# from emitting CLIXML noise on stderr when its output is captured.
-readonly TICK_SCRIPT='$ProgressPreference="SilentlyContinue"; Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait("{F15}")'
+# Compile the native declarations before reading idle time, so activity during
+# PowerShell startup is included. No keyboard assembly is loaded in mouse mode.
+# Suppress the progress stream to avoid CLIXML noise in captured output.
+read -r -d '' CHECK_SCRIPT <<-'POWERSHELL'
+	& {
+		param([UInt64]$IdleSeconds, [string]$Method, [long]$EndEpoch)
+		$ProgressPreference = 'SilentlyContinue'
+		$ErrorActionPreference = 'Stop'
+		try {
+			Add-Type @'
+	using System;
+	using System.Runtime.InteropServices;
+	public static class AwakeInput {
+	    [StructLayout(LayoutKind.Sequential)]
+	    private struct LASTINPUTINFO { public uint cbSize, dwTime; }
+	    [StructLayout(LayoutKind.Sequential)]
+	    private struct MOUSEINPUT {
+	        public int dx, dy;
+	        public uint mouseData, dwFlags, time;
+	        public UIntPtr dwExtraInfo;
+	    }
+	    [StructLayout(LayoutKind.Sequential)]
+	    private struct KEYBDINPUT {
+	        public ushort wVk, wScan;
+	        public uint dwFlags, time;
+	        public UIntPtr dwExtraInfo;
+	    }
+	    [StructLayout(LayoutKind.Sequential)]
+	    private struct HARDWAREINPUT {
+	        public uint uMsg;
+	        public ushort wParamL, wParamH;
+	    }
+	    [StructLayout(LayoutKind.Explicit)]
+	    private struct INPUTUNION {
+	        [FieldOffset(0)] public MOUSEINPUT mi;
+	        [FieldOffset(0)] public KEYBDINPUT ki;
+	        [FieldOffset(0)] public HARDWAREINPUT hi;
+	    }
+	    [StructLayout(LayoutKind.Sequential)]
+	    private struct INPUT { public uint type; public INPUTUNION data; }
+	    [DllImport("user32.dll", SetLastError = true)]
+	    private static extern bool GetLastInputInfo(ref LASTINPUTINFO info);
+	    [DllImport("kernel32.dll")]
+	    private static extern uint GetTickCount();
+	    [DllImport("user32.dll", SetLastError = true)]
+	    private static extern uint SendInput(uint count, INPUT[] inputs, int size);
+	    public static uint IdleMilliseconds() {
+	        LASTINPUTINFO info = new LASTINPUTINFO();
+	        info.cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO));
+	        if (!GetLastInputInfo(ref info))
+	            throw new InvalidOperationException("GetLastInputInfo failed (Win32 error " + Marshal.GetLastWin32Error() + ").");
+	        return unchecked(GetTickCount() - info.dwTime);
+	    }
+	    public static void PulseMouse() {
+	        INPUT[] inputs = new INPUT[1];
+	        inputs[0].type = 0; // INPUT_MOUSE
+	        inputs[0].data.mi.dwFlags = 0x0001; // MOUSEEVENTF_MOVE, dx = dy = 0
+	        if (SendInput(1, inputs, Marshal.SizeOf(typeof(INPUT))) != 1)
+	            throw new InvalidOperationException("SendInput did not accept the mouse pulse (Win32 error " + Marshal.GetLastWin32Error() + ").");
+	    }
+	}
+	'@
+			if ($Method -eq 'f15') { Add-Type -AssemblyName System.Windows.Forms }
+			# Startup may outlast a short --for duration. Never send past it.
+			if ($EndEpoch -gt 0 -and [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() -ge $EndEpoch) {
+				'expired 0'
+				return
+			}
+			$idle = [AwakeInput]::IdleMilliseconds()
+			if ([UInt64]$idle -lt $IdleSeconds * 1000) {
+				"skipped $idle"
+			} else {
+				if ($Method -eq 'mouse') { [AwakeInput]::PulseMouse() }
+				else { [System.Windows.Forms.SendKeys]::SendWait('{F15}') }
+				"sent $idle"
+			}
+		} catch {
+			[Console]::Error.WriteLine($_.Exception.Message)
+			exit 1
+		}
+	}
+POWERSHELL
+readonly CHECK_SCRIPT
 
-send_tick() {
-	"$powershell" -NoProfile -NonInteractive -Command "$TICK_SCRIPT" 2>&1
+check_activity() {
+	"$powershell" -NoProfile -NonInteractive -Command "$CHECK_SCRIPT" \
+		"$idle_threshold" "$method" "${end_epoch:-0}" 2>&1
 }
 
 resumed_msg='normal sleep and screensaver behavior resumed.'
@@ -177,7 +281,8 @@ dashboard=0
 dashboard_active=0
 resize_pending=0
 start_epoch=''
-next_tick=''
+next_check=''
+activity_status='WAITING FOR FIRST CHECK'
 last_error=''
 frame=0
 term_rows=24
@@ -272,13 +377,13 @@ render_dashboard() {
 	else
 		remaining_label='UNLIMITED'
 	fi
-	next_label="$(fmt_duration "$((next_tick > now ? next_tick - now : 0))")"
+	next_label="$(fmt_duration "$((next_check > now ? next_check - now : 0))")"
 
 	if ((letters_only == 0 && (term_cols < 40 || term_rows < 12))); then
-		minimal_line="KEEP AWAKE  |  TICKS $ticks  |  NEXT $next_label"
+		minimal_line="${method^^} | PULSES $pulses | CHECK $next_label"
 		minimal_line="${minimal_line:0:term_cols}"
 		draw_buf+="${ESC}[$((term_rows / 2));1H${HELION_PINK}${minimal_line}"
-		minimal_line="ELAPSED $elapsed_label  |  REMAINING $remaining_label"
+		minimal_line="${last_error:-$activity_status}"
 		minimal_line="${minimal_line:0:term_cols}"
 		draw_buf+="${ESC}[$((term_rows / 2 + 1));1H${HELION_WHITE}${minimal_line}"
 		printf '%s' "$draw_buf"
@@ -329,13 +434,13 @@ render_dashboard() {
 	border=${border// /-}
 	draw_buf+="${ESC}[${panel_top};$(((term_cols - panel_width) / 2 + 1))H${HELION_BG}${HELION_BLUE}+${border}+"
 	panel_row "$((panel_top + 1))" 'H E L I O N   //   K E E P   A W A K E' "$HELION_PINK"
-	panel_row "$((panel_top + 2))" 'STATUS  ONLINE' "$HELION_WHITE"
-	panel_row "$((panel_top + 3))" "TICKS  $ticks     ELAPSED  $elapsed_label     NEXT  $next_label" "$HELION_WHITE"
-	panel_row "$((panel_top + 4))" "REMAINING  $remaining_label" "$HELION_MUTED"
+	panel_row "$((panel_top + 2))" "METHOD  ${method^^}  //  IDLE THRESHOLD  ${idle_threshold}s" "$HELION_WHITE"
+	panel_row "$((panel_top + 3))" "PULSES  $pulses     ELAPSED  $elapsed_label     CHECK  $next_label" "$HELION_WHITE"
+	panel_row "$((panel_top + 4))" "REMAINING  $remaining_label  //  $activity_status" "$HELION_MUTED"
 	if [[ -n "$last_error" ]]; then
 		status_text="LAST ERROR  $last_error"
 	else
-		status_text='F15 PULSE ACTIVE  //  WINDOWS SESSION HELD OPEN'
+		status_text='RECENT KEYBOARD OR MOUSE INPUT SKIPS THE PULSE'
 	fi
 	panel_row "$((panel_top + 5))" "$status_text" "$HELION_PINK"
 	panel_row "$((panel_top + 6))" 'CTRL+C TO STOP' "$HELION_MUTED"
@@ -344,7 +449,19 @@ render_dashboard() {
 	frame=$((frame + 1))
 }
 
+pause_for() {
+	sleep "$1" &
+	wait $! || true
+}
+
 on_signal() {
+	local sleeper
+	# Loop sleeps are our only background jobs. Query the job table because a
+	# signal can arrive between spawning a sleep and saving its PID.
+	for sleeper in $(jobs -pr); do
+		kill "$sleeper" 2>/dev/null || true
+		wait "$sleeper" 2>/dev/null || true
+	done
 	cleanup_dashboard
 	((dashboard)) || echo
 	# "early" only means something when there was a deadline to fall short of.
@@ -365,16 +482,15 @@ fi
 
 if ((dashboard)); then
 	setup_dashboard
-elif [[ -n "$end_epoch" ]]; then
-	echo "keep_awake: holding this machine awake for $duration_label (tick every ${interval}s). Ctrl+C to stop early."
 else
-	echo "keep_awake: holding this machine awake (tick every ${interval}s). Ctrl+C to stop."
+	echo "keep_awake: holding this machine awake${duration_label:+ for $duration_label} (method $method, idle threshold ${idle_threshold}s, check every ${check_interval}s). Ctrl+C to stop."
 fi
 
-ticks=0
+pulses=0
+successful_checks=0
 remaining=0
 start_epoch=$EPOCHSECONDS
-next_tick=$start_epoch
+next_check=$start_epoch
 while :; do
 	now=$EPOCHSECONDS
 	if [[ -n "$end_epoch" ]]; then
@@ -382,49 +498,68 @@ while :; do
 		((remaining > 0)) || break
 	fi
 
-	if ((now >= next_tick)); then
-		if ! output="$(send_tick)"; then
+	if ((now >= next_check)); then
+		next_check=$((now + check_interval))
+		check_ok=0
+		if output="$(check_activity)"; then
+			output="${output//$'\r'/}"
+			if [[ "$output" =~ ^(sent|skipped|expired)\ ([0-9]+)$ ]]; then
+				check_ok=1
+				result="${BASH_REMATCH[1]}"
+				idle_seconds=$((10#${BASH_REMATCH[2]} / 1000))
+			else
+				output="unexpected PowerShell response: ${output:-<no output>}"
+			fi
+		fi
+		now=$EPOCHSECONDS
+		if [[ -n "$end_epoch" ]]; then
+			remaining=$((end_epoch > now ? end_epoch - now : 0))
+		fi
+		if ((check_ok == 0)); then
 			output="${output//$'\r'/ }"
 			output="${output//$'\n'/ }"
 			output="${output//$'\033'/}"
-			if ((ticks == 0)); then
+			if ((successful_checks == 0)); then
 				cleanup_dashboard
-				echo "keep_awake: first tick failed, aborting. PowerShell said:" >&2
+				echo "keep_awake: first activity check failed, aborting. PowerShell said:" >&2
 				echo "${output:-<no output>}" >&2
 				exit 1
 			fi
 			last_error="${output:-<no output>}"
 			if ((dashboard == 0)); then
-				echo "[$(date +%H:%M:%S)] tick failed: ${output:-<no output>}" >&2
+				echo "[$(date +%H:%M:%S)] activity check failed: $last_error" >&2
 			fi
 		else
-			((ticks++))
+			[[ "$result" == expired ]] && break
+			((successful_checks++))
+			last_error=''
+			if [[ "$result" == sent ]]; then
+				((pulses++))
+				activity_status="PULSE SENT AFTER ${idle_seconds}s IDLE"
+				message="$method pulse $pulses sent (idle ${idle_seconds}s)"
+			else
+				activity_status="RECENT INPUT: IDLE ${idle_seconds}s"
+				message="pulse skipped: recent input (idle ${idle_seconds}s)"
+			fi
 			if ((dashboard == 0)); then
-				if [[ -n "$end_epoch" ]]; then
-					printf '[%s] awake tick %d sent (%s left)\n' \
-						"$(date +%H:%M:%S)" "$ticks" "$(fmt_duration "$remaining")"
-				else
-					printf '[%s] awake tick %d sent\n' "$(date +%H:%M:%S)" "$ticks"
-				fi
+				[[ -n "$end_epoch" ]] && message+=" ($(fmt_duration "$remaining") left)"
+				printf '[%s] %s\n' "$(date +%H:%M:%S)" "$message"
 			fi
 		fi
-		now=$EPOCHSECONDS
-		next_tick=$((now + interval))
 	fi
+	[[ -n "$end_epoch" ]] && ((remaining == 0)) && break
 
 	if ((dashboard)); then
 		render_dashboard "$now"
-		sleep 0.1 &
-		wait $! || true
+		pause_for 0.1
 	else
 		# Never sleep past the deadline, or the last stretch would go unguarded.
-		nap=$((next_tick - now))
+		nap=$((next_check - now))
 		if [[ -n "$end_epoch" ]] && ((remaining < nap)); then
 			nap="$remaining"
 		fi
-		((nap > 0)) || nap=1
-		sleep "$nap" &
-		wait $! || true
+		((nap > 0)) || continue
+		pause_for "$nap"
 	fi
 done
 
